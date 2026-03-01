@@ -1,0 +1,359 @@
+---
+title: "BAN 502 Phase 2: Exploratory Analysis of Super Soaker Failures"
+author: "Brendan Hudson"
+date: "2026-02-16"
+output: word_document
+---
+
+# Phase 1: Exploratory Data Analysis
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+## Introduction
+
+This project explores the product testing dataset to look for patterns related to product failure.
+
+No predictive models are used in this phase. The goal is simply to understand the data and see which variables might matter later.
+
+## Load Data
+
+```{r}
+train <- read_csv("train.csv")
+
+train$failure <- as_factor(train$failure)
+train$product_code <- as_factor(train$product_code)
+train$attribute_0 <- as_factor(train$attribute_0)
+train$attribute_1 <- as_factor(train$attribute_1)
+```
+
+Categorical variables were converted to factors for proper summaries and plots.
+
+## Dataset Overview
+
+```{r}
+str(train)
+summary(train)
+```
+
+This shows the number of observations, variable types, and basic statistics.
+
+## Failure Distribution
+
+```{r}
+table(train$failure)
+prop.table(table(train$failure))
+```
+
+```{r}
+ggplot(train, aes(x = failure)) +
+  geom_bar(fill = "steelblue") +
+  labs(
+    title = "Distribution of Product Failures",
+    x = "Failure Outcome",
+    y = "Count"
+  )
+```
+
+About **21% of the products failed**, so failures are less common than successes.
+
+## Missing Data
+
+```{r}
+missing_counts <- colSums(is.na(train))
+sort(colSums(is.na(train)), decreasing = TRUE)
+missing_counts <- colSums(is.na(train))
+barplot(missing_counts,
+        main="Missing Values per Variable",
+        ylab="Number Missing")
+```
+
+Some measurement variables have missing values. This will need attention in Phase 2.
+
+## Numeric Variables vs Failure
+
+There are many measurement variables, so summary statistics were checked first.
+
+```{r}
+measurement_vars <- train %>%
+  select(starts_with("measurement"))
+summary(measurement_vars)
+```
+
+A few measurements were then selected to compare distributions.
+
+```{r}
+ggplot(train, aes(x = failure, y = loading)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Loading by Failure Status")
+
+ggplot(train, aes(x = failure, y = measurement_5)) +
+  geom_boxplot(fill = "lightgreen") +
+  labs(title = "Measurement 5 by Failure Status")
+
+ggplot(train, aes(x = failure, y = measurement_10)) +
+  geom_boxplot(fill = "lightyellow") +
+  labs(title = "Measurement 10 by Failure Status")
+
+ggplot(train, aes(x = failure, y = measurement_17)) +
+  geom_boxplot(fill = "lightcoral") +
+  labs(title = "Measurement 17 by Failure Status")
+```
+
+These plots show visible differences between failed and non-failed products, suggesting some numeric variables may relate to failure.
+
+## Categorical Variables vs Failure
+
+```{r}
+table(train$failure, train$product_code)
+prop.table(table(train$failure, train$product_code), 2)
+```
+
+```{r}
+ggplot(train, aes(x = product_code, fill = failure)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Failure Rate by Product Type",
+    y = "Proportion"
+  )
+```
+
+Failure rates differ by product type, which may indicate design differences matter.
+
+## Key Findings
+
+- About **21%** of products failed
+- Loading and several measurements show different distributions by outcome
+- Failure varies across product types
+- Missing data is present in several variables
+
+Overall, the exploratory analysis highlights multiple variables that could be useful predictors when building models in the next phase.
+
+# Phase 2: Predictive Modeling
+
+## Step 1: Handle Missing Data
+                
+```{r}
+train_clean <- train %>%
+  filter(!is.na(loading)) %>%
+  mutate(across(where(is.numeric),
+                ~ replace_na(., mean(., na.rm = TRUE))))
+```
+
+*Filled in missing numbers with the column mean to keep all the rows*
+
+## Step 2: Train/Test Split
+
+```{r, include=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(mice)
+library(VIM)
+library(ranger)
+library(RColorBrewer)
+library(rpart)
+library(rattle)
+library(e1071)
+library(xgboost)
+library(usemodels)
+library(nnet)
+library(stacks)
+```
+
+```{r}
+set.seed(123)
+train_split <- initial_split(train_clean, prop = 0.7, strata = failure)
+train_data <- training(train_split)
+test_data  <- testing(train_split)
+```
+
+## Step 3: Logistic Regression
+
+```{r}
+set.seed(123)
+folds <- vfold_cv(train_data, v = 5)
+```
+
+```{r}
+failure_recipe <- recipe(failure ~ ., data = train_data) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+```
+
+```{r}
+log_model <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+log_workflow <- workflow() %>%
+  add_model(log_model) %>%
+  add_recipe(failure_recipe)
+
+log_fit <- fit(log_workflow, data = train_data)
+```
+
+```{r}
+log_preds <- predict(log_fit, test_data, type = "class") %>%
+  bind_cols(test_data)
+
+confusionMatrix(log_preds$.pred_class, test_data$failure)
+```
+
+## Step 4: Classification Tree
+
+```{r}
+tree_recipe <- recipe(failure ~ ., data = train_data) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+```
+
+```{r}
+tree_model <- decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_workflow <- workflow() %>%
+  add_model(tree_model) %>%
+  add_recipe(failure_recipe)
+
+set.seed(1234)
+tree_res <- tree_workflow %>%
+  tune_grid(resamples = folds, grid = 25)
+
+saveRDS(tree_res, "tree_res.rds")
+```
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2)
+```
+
+```{r}
+final_tree <- finalize_workflow(tree_workflow, select_best(tree_res, metric="accuracy")) %>%
+  fit(data = train_data)
+```
+
+```{r}
+tree_preds <- predict(final_tree, test_data, type = "class") %>%
+  bind_cols(test_data)
+
+confusionMatrix(tree_preds$.pred_class, test_data$failure)
+```
+
+## Step 5: Random Forest
+
+```{r}
+rf_recipe <- recipe(failure ~ ., data = train_data) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+```
+
+```{r}
+rf_model <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = 100
+) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("classification")
+
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+set.seed(1234)
+rf_res <- tune_grid(
+  rf_workflow,
+  resamples = folds,
+  grid = 30
+)
+
+saveRDS(rf_res, "rf_res.rds")
+```
+
+```{r}
+rf_res %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy", x = "mtry", color = "min_n")
+```
+
+```{r}
+final_rf <- finalize_workflow(
+  rf_workflow,
+  select_best(rf_res, metric="accuracy")
+) %>%
+  fit(data = train_data)
+```
+
+```{r}
+rf_preds <- predict(final_rf, test_data, type = "class") %>%
+  bind_cols(test_data)
+
+confusionMatrix(rf_preds$.pred_class, test_data$failure)
+```
+
+*Because failures are relatively rare (21%), model performance was evaluated using sensitivity and specificity in addition to overall accuracy.*
+
+## Step 6: Model Evaluation
+
+```{r}
+log_cm  <- confusionMatrix(log_preds$.pred_class, test_data$failure)
+tree_cm <- confusionMatrix(tree_preds$.pred_class, test_data$failure)
+rf_cm   <- confusionMatrix(rf_preds$.pred_class, test_data$failure)
+```
+
+```{r}
+model_results <- data.frame(
+  Model = c("Logistic Regression", "Classification Tree", "Random Forest"),
+  Accuracy = c(log_cm$overall["Accuracy"],
+               tree_cm$overall["Accuracy"],
+               rf_cm$overall["Accuracy"]),
+  Sensitivity = c(log_cm$byClass["Sensitivity"],
+                  tree_cm$byClass["Sensitivity"],
+                  rf_cm$byClass["Sensitivity"]),
+  Specificity = c(log_cm$byClass["Specificity"],
+                  tree_cm$byClass["Specificity"],
+                  rf_cm$byClass["Specificity"])
+)
+
+model_results
+```
+
+*The models did a decent job overall, but they weren’t great at identifying the few products that actually failed.*
+
+## Step 7: Kaggle Submission
+
+```{r}
+kaggle_test <- read_csv("C:/Users/brewayne/Downloads/test.csv")
+```
+
+```{r}
+rf_preds_kaggle <- predict(final_rf, new_data = kaggle_test, type = "class")
+
+rf_submission <- data.frame(
+  id = kaggle_test$id,
+  failure = rf_preds_kaggle$.pred_class
+)
+
+write.csv(rf_submission, "rf_submission.csv", row.names = FALSE)
+```
+
+```{r}
+tree_preds_kaggle <- predict(final_tree, new_data = kaggle_test, type = "class")
+
+tree_submission <- data.frame(
+  id = kaggle_test$id,
+  failure = tree_preds_kaggle$.pred_class
+)
+
+write.csv(tree_submission, "tree_submission.csv", row.names = FALSE)
+```

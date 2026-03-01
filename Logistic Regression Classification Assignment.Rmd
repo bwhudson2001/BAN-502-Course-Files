@@ -1,0 +1,209 @@
+---
+title: "Untitled"
+author: "Brendan Hudson"
+date: "2026-01-29"
+output: word_document
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(e1071)
+library(ROCR)
+```
+
+```{r}
+parole <- read_csv("C:/Users/brewayne/Downloads/parole.csv")
+```
+
+```{r}
+parole <- parole %>%
+  mutate(
+    male = factor(male, levels = c(0, 1), labels = c("Female", "Male")),
+    
+    race = factor(race, levels = c(1, 2), labels = c("White", "Other")),
+    
+    state = factor(state,
+                   levels = c(1, 2, 3, 4),
+                   labels = c("Other", "Kentucky", "Louisiana", "Virginia")),
+    
+    multiple.offenses = factor(multiple.offenses,
+                               levels = c(0, 1),
+                               labels = c("No", "Yes")),
+    
+    crime = factor(crime,
+                   levels = c(1, 2, 3, 4),
+                   labels = c("Other", "Larceny", "Drug", "Driving")),
+    
+    violator = factor(violator,
+                      levels = c(0, 1),
+                      labels = c("No", "Yes"))
+  )
+```
+
+```{r}
+parole$male <- recode(
+  factor(parole$male),
+  `0` = "Female",
+  `1` = "Male"
+)
+```
+
+```{r}
+parole$race <- recode(
+  factor(parole$race),
+  `1` = "White",
+  `2` = "Other"
+)
+```
+
+```{r}
+parole$state <- recode(
+  factor(parole$state),
+  `1` = "Other",
+  `2` = "Kentucky",
+  `3` = "Louisiana",
+  `4` = "Virginia"
+)
+```
+
+```{r}
+parole$multiple.offenses <- recode(
+  factor(parole$multiple.offenses),
+  `0` = "No",
+  `1` = "Yes"
+)
+```
+
+```{r}
+parole$crime <- recode(
+  factor(parole$crime),
+  `1` = "Other",
+  `2` = "Larceny",
+  `3` = "Drug",
+  `4` = "Driving"
+)
+```
+
+```{r}
+parole$violator <- recode(
+  factor(parole$violator),
+  `0` = "No",
+  `1` = "Yes"
+)
+```
+
+```{r}
+levels(parole$male)
+levels(parole$race)
+levels(parole$state)
+levels(parole$multiple.offenses)
+levels(parole$crime)
+levels(parole$violator)
+```
+
+```{r}
+set.seed(12345)
+parole_split = initial_split(parole, prop = 0.70, strata = violator)
+train = training(parole_split)
+test = testing(parole_split)
+```
+
+```{r}
+parole_model =
+  logistic_reg()%>%
+  set_engine("glm")
+
+parole_recipe = recipe(violator ~ state, train)%>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+logreg_wf = workflow()%>%
+  add_recipe(parole_recipe)%>%
+  add_model(parole_model)
+
+parole_fit = fit(logreg_wf, train)
+```
+
+```{r}
+summary(parole_fit$fit$fit$fit)
+```
+
+```{r}
+parole_model =
+  logistic_reg()%>%
+  set_engine("glm")
+
+parole_recipe = recipe(violator ~ state + race + multiple.offenses, train)%>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+logreg_wf = workflow()%>%
+  add_recipe(parole_recipe)%>%
+  add_model(parole_model)
+
+parole_fit2 = fit(logreg_wf, train)
+```
+
+
+```{r}
+summary(parole_fit2$fit$fit$fit)
+```
+
+```{r}
+newdata = data.frame(state="Louisiana",multiple.offenses="Yes",race="White")
+predict(parole_fit2,newdata,type="prob")
+```
+
+```{r}
+predictions <- predict(parole_fit2, new_data = train, type = "prob") %>%
+  bind_cols(train %>% select(violator))
+```
+
+```{r}
+ROCRpred <- prediction(
+  predictions = predictions$.pred_Yes,  # numeric probabilities of "Yes"
+  labels = predictions$violator         # true labels
+)
+```
+
+```{r}
+ROCRperf=performance(ROCRpred,"tpr","fpr")
+plot(ROCRperf, colorize = TRUE, print.cutoffs.at = seq(0,1,b=0.1),text.adj=c(-0.2,1.7))
+```
+
+```{r}
+opt.cut=function(perf,pred){
+  cut.ind=mapply(FUN=function(x,y,p){
+    d=(x-0)^2+(y-1)^2
+    ind=which(d==min(d))
+    c(sensitivity=y[[ind]],specificity=1-x[[ind]],
+      cutoff=p[[ind]])
+  },perf@x.values,perf@y.values,pred@cutoffs)
+}
+print(opt.cut(ROCRperf,ROCRpred))
+```
+
+```{r}
+predictions_numeric <- ROCRpred@predictions[[1]]
+
+# Labels as factor
+train$violator <- factor(train$violator, levels = c("No", "Yes"))
+
+# Cutoff
+cutoff <- 0.2015788
+
+# Confusion matrix
+cm <- table(train$violator, predictions_numeric > cutoff)
+print(cm)
+```
+
+```{r}
+TP <- cm[2,2]
+FN <- cm[2,1]
+sensitivity <- TP / (TP + FN)
+```
+
+```{r}
+TN <- cm[1,1]
+FP <- cm[1,2]
+accuracy <- (TP + TN) / sum(cm)
+```
